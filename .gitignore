@@ -1,0 +1,24 @@
+# Downloads
+downloads/
+
+# Output manifests (regenerated per run)
+output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Browser profiles
+browser_profile_tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
