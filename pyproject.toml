@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools==83.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "douyin-image-downloader"
+version = "1.0.0"
+description = "Privacy-safe downloader for original images from Douyin account photo posts"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+  "Pillow==12.3.0",
+  "playwright==1.62.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pip-audit==2.10.1",
+  "pytest==9.1.1",
+  "ruff==0.16.4",
+  "setuptools==83.0.0",
+]
+
+[project.scripts]
+douyin-image = "scraper.cli:main"
+
+[tool.setuptools]
+packages = ["scraper"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

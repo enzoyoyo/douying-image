@@ -1,0 +1,60 @@
+# Downloads
+downloads/
+
+# Output manifests (regenerated per run)
+output/
+
+# Dedicated browser sessions and authentication material
+.douyin-session/
+sessions/
+.auth/
+auth/
+browser-profile/
+profiles/
+user-data/
+userdata/
+*.storage-state.json
+storage_state.json
+cookies.json
+credentials.json
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local state
+*.db
+*.sqlite
+*.sqlite3
+*.log
+logs/
+*.har
+traces/
+trace.zip
+screenshots/
+playwright-report/
+test-results/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
