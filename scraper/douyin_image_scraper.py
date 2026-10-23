@@ -9,6 +9,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote, urlsplit
 
 if __package__ in (None, ""):  # Support direct execution without duplicating the CLI.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -35,6 +36,33 @@ MAX_IMAGES_PER_POST = 100
 MAX_ALLOWED_POSTS = 10_000
 MAX_ALLOWED_IMAGES = 20_000
 MAX_ALLOWED_TOTAL_BYTES = 100 * 1024 * 1024 * 1024
+USER_POST_API_PATH = "/aweme/v1/web/aweme/post/"
+
+# Params the page owns (session tokens, signatures, device ids). They must not be
+# copied from a sampled request: stale or duplicated values break the signature.
+PAGE_OWNED_PARAMS = frozenset(
+    {
+        "webid",
+        "uifid",
+        "msToken",
+        "a_bogus",
+        "verifyFp",
+        "fp",
+        "s_v_web_id",
+        "x-secsdk-web-signature",
+        "_signature",
+    }
+)
+# Pagination/target params come from the caller, never from the sampled request.
+CALLER_OWNED_PARAMS = frozenset(
+    {
+        "sec_user_id",
+        "max_cursor",
+        "cursor",
+        "count",
+    }
+)
+PAGINATION_MODES = ("auto", "api", "scroll")
 
 
 class DependencyUnavailableError(RuntimeError):
@@ -73,12 +101,19 @@ class DouyinImageScraper:
         max_file_bytes: int = 50 * 1024 * 1024,
         max_total_bytes: int = 5 * 1024 * 1024 * 1024,
         redownload: bool = False,
+        pagination: str = "auto",
+        page_size: int = 20,
+        page_interval_ms: int = 1_000,
+        concurrency: int = 1,
+        download_user_agent: str | None = None,
     ) -> None:
         self.target: AccountTarget = validate_account_url(account_url)
         if max_scroll <= 0:
             raise InputValidationError("max_scroll_must_be_positive")
         if stall_rounds <= 0:
             raise InputValidationError("stall_rounds_must_be_positive")
+        if pagination not in PAGINATION_MODES:
+            raise InputValidationError("pagination_mode_unknown")
         if max_items <= 0 or max_items > MAX_ALLOWED_POSTS:
             raise InputValidationError("max_items_out_of_range")
         if max_images <= 0 or max_images > MAX_ALLOWED_IMAGES:
@@ -95,6 +130,12 @@ class DouyinImageScraper:
             raise InputValidationError("max_file_size_too_small")
         if max_total_bytes < 1_024 or max_total_bytes > MAX_ALLOWED_TOTAL_BYTES:
             raise InputValidationError("max_total_size_out_of_range")
+        if page_size <= 0 or page_size > 50:
+            raise InputValidationError("page_size_out_of_range")
+        if page_interval_ms < 0:
+            raise InputValidationError("page_interval_must_be_nonnegative")
+        if concurrency <= 0 or concurrency > 16:
+            raise InputValidationError("concurrency_out_of_range")
 
         self.output_base = Path(output_dir).expanduser()
         self.manifest_base = Path(manifest_dir).expanduser()
@@ -113,6 +154,11 @@ class DouyinImageScraper:
         self.max_file_bytes = max_file_bytes
         self.max_total_bytes = max_total_bytes
         self.redownload = redownload
+        self.pagination = pagination
+        self.page_size = page_size
+        self.page_interval_ms = page_interval_ms
+        self.concurrency = concurrency
+        self.download_user_agent = download_user_agent
 
         self._reset_capture_state()
 
@@ -128,6 +174,7 @@ class DouyinImageScraper:
         self._completion_reason = "not_started"
         self._warnings: set[str] = set()
         self._limit_reasons: set[str] = set()
+        self._sampled_api_query: str | None = None
 
     @staticmethod
     def _as_bool(value: object) -> bool:
@@ -233,6 +280,41 @@ class DouyinImageScraper:
             self._warnings.add("post_api_invalid_payload")
             return
 
+        self._sample_request_query(response_url)
+        self._absorb_payload(payload, response_url)
+
+    @staticmethod
+    def _business_query(query: str) -> str:
+        """Keep only reusable business params from a sampled API request URL."""
+
+        kept: list[str] = []
+        for pair in query.split("&"):
+            if not pair or "=" not in pair:
+                continue
+            name = pair.split("=", 1)[0]
+            if name in PAGE_OWNED_PARAMS or name in CALLER_OWNED_PARAMS:
+                continue
+            kept.append(pair)
+        return "&".join(kept)
+
+    def _sample_request_query(self, response_url: str) -> None:
+        """Capture one real request's business params for direct in-page pagination."""
+
+        if self._sampled_api_query is not None:
+            return
+        try:
+            parsed = urlsplit(response_url)
+        except ValueError:
+            return
+        if parsed.path.rstrip("/") != USER_POST_API_PATH.rstrip("/"):
+            return
+        sampled = self._business_query(parsed.query)
+        if sampled:
+            self._sampled_api_query = sampled
+
+    def _absorb_payload(self, payload: dict, response_url: str) -> None:
+        """Merge one post-list API payload into capture state."""
+
         self._api_response_count += 1
         has_more = self._as_bool(payload.get("has_more", False))
         self._last_has_more = has_more
@@ -302,6 +384,98 @@ class DouyinImageScraper:
                 return
 
         self._completion_reason = "max_scroll"
+
+    _IN_PAGE_FETCH_SCRIPT = """
+        async (targetUrl) => {
+            const response = await fetch(targetUrl, {
+                method: 'GET',
+                credentials: 'include',
+                headers: { 'Accept': 'application/json, text/plain, */*' },
+            });
+            const text = await response.text();
+            return { status: response.status, text: text.slice(0, 11 * 1024 * 1024) };
+        }
+    """
+
+    def _api_paginate(self, page) -> bool:
+        """Paginate the post list API from inside the page context.
+
+        The first-party page already owns every session token and request
+        signature, so requests issued from page JS are signed correctly without
+        reimplementing any signing scheme. Returns True when this mode ran the
+        capture; False (with a warning recorded) means fall back to scrolling.
+        """
+
+        if self._capture_complete or self._api_capture_exhausted:
+            return True
+        if self._sampled_api_query is None:
+            self._warnings.add("api_pagination_no_sampled_request")
+            return False
+
+        query_template = self._sampled_api_query
+        cursor = 0
+        pages_fetched = 0
+
+        while len(self._posts) < self.max_items:
+            if self._capture_complete or self._api_capture_exhausted:
+                return True
+
+            query = (
+                f"{query_template}&sec_user_id={quote(self.target.account_id, safe='')}"
+                f"&max_cursor={cursor}&count={self.page_size}"
+            )
+            url = f"{USER_POST_API_PATH}?{query}"
+            try:
+                result = page.evaluate(self._IN_PAGE_FETCH_SCRIPT, url)
+            except Exception:
+                self._warnings.add("api_pagination_request_failed")
+                return False
+
+            status = int(result.get("status", 0) or 0)
+            if status != 200:
+                self._warnings.add("api_pagination_http_error")
+                return False
+
+            body_text = result.get("text") or ""
+            if len(body_text.encode()) > MAX_API_RESPONSE_BYTES:
+                self._stop_for_api_limit(
+                    "api_response_too_large", "post_api_response_too_large"
+                )
+                return True
+            try:
+                payload = json.loads(body_text)
+            except Exception:
+                self._warnings.add("api_pagination_invalid_json")
+                return False
+            if not isinstance(payload, dict):
+                self._warnings.add("api_pagination_invalid_payload")
+                return False
+
+            previous_cursor = cursor
+            self._absorb_payload(payload, url)
+            pages_fetched += 1
+
+            if self._capture_complete or self._api_capture_exhausted:
+                return True
+            if not self._last_has_more:
+                return True
+
+            next_cursor = payload.get("max_cursor")
+            try:
+                cursor = int(next_cursor)
+            except (TypeError, ValueError):
+                self._warnings.add("api_pagination_cursor_invalid")
+                return False
+            if cursor == previous_cursor:
+                self._completion_reason = "cursor_stalled"
+                return True
+
+            if self.page_interval_ms > 0:
+                page.wait_for_timeout(self.page_interval_ms)
+
+        self._limit_reasons.add("max_items")
+        self._completion_reason = "max_items"
+        return True
 
     def _image_posts(self) -> list[tuple[str, dict]]:
         return [
@@ -407,6 +581,8 @@ class DouyinImageScraper:
         plans: list[PlannedImage],
         downloader: ImageDownloader,
     ) -> list[dict]:
+        if self.concurrency > 1:
+            return self._download_plans_concurrent(plans, downloader)
         records: list[dict] = []
         accounted_bytes = 0
         for position, plan in enumerate(plans, start=1):
@@ -431,6 +607,71 @@ class DouyinImageScraper:
             records.append(self._public_record(plan, result))
             accounted_bytes += result.byte_count
         return records
+
+    def _download_plans_concurrent(
+        self,
+        plans: list[PlannedImage],
+        downloader: ImageDownloader,
+    ) -> list[dict]:
+        """Parallel downloads with a shared byte budget, preserving plan order."""
+
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        records: list[dict | None] = [None] * len(plans)
+        state_lock = threading.Lock()
+        local = threading.local()
+        accounted_bytes = 0
+        budget_exhausted = False
+
+        def thread_downloader() -> ImageDownloader:
+            existing = getattr(local, "downloader", None)
+            if existing is None:
+                existing = ImageDownloader(
+                    retries=downloader.retries,
+                    timeout_ms=downloader.timeout_ms,
+                    max_bytes=downloader.max_bytes,
+                    redownload=downloader.redownload,
+                    user_agent=downloader.user_agent,
+                    sleep_fn=downloader.sleep_fn,
+                    monotonic_fn=downloader.monotonic_fn,
+                    connection_factory=downloader.connection_factory,
+                )
+                local.downloader = existing
+            return existing
+
+        def work(item: tuple[int, PlannedImage]) -> None:
+            nonlocal accounted_bytes, budget_exhausted
+            position, plan = item
+            with state_lock:
+                if budget_exhausted:
+                    records[position] = self._public_record(
+                        plan, DownloadResult.failed("total_byte_limit", attempts=0)
+                    )
+                    return
+                remaining_bytes = self.max_total_bytes - accounted_bytes
+                if remaining_bytes < 1_024:
+                    budget_exhausted = True
+                    self._warnings.add("total_byte_limit_reached")
+                    records[position] = self._public_record(
+                        plan, DownloadResult.failed("total_byte_limit", attempts=0)
+                    )
+                    return
+
+            worker_downloader = thread_downloader()
+            worker_downloader.max_bytes = min(self.max_file_bytes, remaining_bytes)
+            result = worker_downloader.download(plan.candidates, self.download_dir, plan.stem)
+            if result.error_code == "image_too_large" and remaining_bytes < self.max_file_bytes:
+                result = DownloadResult.failed("total_byte_limit", attempts=result.attempts)
+                self._warnings.add("total_byte_limit_reached")
+            with state_lock:
+                accounted_bytes += result.byte_count
+            records[position] = self._public_record(plan, result)
+
+        workers = min(self.concurrency, max(1, len(plans)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(work, enumerate(plans)))
+        return [record for record in records if record is not None]
 
     def _open_browser(self, playwright):
         session_dir = self._prepare_session_dir()
@@ -514,7 +755,14 @@ class DouyinImageScraper:
 
                     initial_wait_ms = 3_000 + self.login_wait_seconds * 1_000
                     page.wait_for_timeout(initial_wait_ms)
-                    self._scroll_to_load(page)
+
+                    api_ran = False
+                    if self.pagination in ("auto", "api"):
+                        api_ran = self._api_paginate(page)
+                        if not api_ran:
+                            self._warnings.add("api_pagination_fallback_to_scroll")
+                    if self.pagination == "scroll" or (self.pagination == "auto" and not api_ran):
+                        self._scroll_to_load(page)
 
                     if self._completion_reason == "not_started":
                         self._completion_reason = "initial_page_complete"
@@ -526,6 +774,7 @@ class DouyinImageScraper:
                         timeout_ms=self.request_timeout_ms,
                         max_bytes=self.max_file_bytes,
                         redownload=self.redownload,
+                        user_agent=self.download_user_agent,
                     )
 
                     records = self._download_plans(plans, downloader)
@@ -593,6 +842,7 @@ class DouyinImageScraper:
             "bytes_accounted": manifest["downloads"]["bytes_accounted"],
             "capture_complete": self._capture_complete,
             "completion_reason": self._completion_reason,
+            "pagination_mode": self.pagination,
             "output_folder": self.download_dir.name,
             "manifest_file": self.manifest_path.name,
             "warnings": sorted(self._warnings),

@@ -77,6 +77,39 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-total-mb", type=_positive_int, default=5_120)
     parser.add_argument("--redownload", action="store_true")
     parser.add_argument(
+        "--pagination",
+        choices=("auto", "api", "scroll"),
+        default="auto",
+        help=(
+            "post-list capture mode: api paginates the interface from inside the "
+            "page (fast), scroll loads pages by scrolling (slow); auto tries api "
+            "first and falls back to scroll"
+        ),
+    )
+    parser.add_argument(
+        "--page-size",
+        type=_positive_int,
+        default=20,
+        help="posts per API page when --pagination uses the api mode",
+    )
+    parser.add_argument(
+        "--page-interval",
+        type=_pause_seconds,
+        default=1.0,
+        help="wait between API pages (seconds)",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=_positive_int,
+        default=1,
+        help="parallel image download workers (1 keeps the original serial behavior)",
+    )
+    parser.add_argument(
+        "--download-user-agent",
+        default=None,
+        help="User-Agent used for image downloads (defaults to a desktop Chrome UA)",
+    )
+    parser.add_argument(
         "--session-dir",
         default=None,
         help=(
@@ -126,6 +159,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_file_bytes=args.max_file_mb * 1024 * 1024,
             max_total_bytes=args.max_total_mb * 1024 * 1024,
             redownload=args.redownload,
+            pagination=args.pagination,
+            page_size=args.page_size,
+            page_interval_ms=round(args.page_interval * 1_000),
+            concurrency=args.concurrency,
+            download_user_agent=args.download_user_agent,
         )
         result = scraper.run()
     except InputValidationError as exc:
