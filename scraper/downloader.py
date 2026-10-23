@@ -21,6 +21,10 @@ from .security import InputValidationError, safe_output_path, validate_media_url
 IMAGE_EXTENSIONS = (".jpg", ".png", ".webp", ".avif", ".heic")
 RETRYABLE_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 READ_CHUNK_BYTES = 64 * 1024
+DEFAULT_DOWNLOAD_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 _TRANSPORT_LEAK_GUARD = threading.Event()
 
 
@@ -91,6 +95,7 @@ class ImageDownloader:
         timeout_ms: int = 30_000,
         max_bytes: int = 50 * 1024 * 1024,
         redownload: bool = False,
+        user_agent: str | None = None,
         sleep_fn: Callable[[float], None] = time.sleep,
         monotonic_fn: Callable[[], float] = time.monotonic,
         connection_factory=HTTPSConnection,
@@ -99,6 +104,7 @@ class ImageDownloader:
         self.timeout_ms = timeout_ms
         self.max_bytes = max_bytes
         self.redownload = redownload
+        self.user_agent = user_agent or DEFAULT_DOWNLOAD_USER_AGENT
         self.sleep_fn = sleep_fn
         self.monotonic_fn = monotonic_fn
         self.connection_factory = connection_factory
@@ -200,7 +206,7 @@ class ImageDownloader:
                     "Accept": "image/avif,image/webp,image/*,*/*;q=0.1",
                     "Accept-Encoding": "identity",
                     "Referer": "https://www.douyin.com/",
-                    "User-Agent": "douyin-image-downloader/1.0",
+                    "User-Agent": self.user_agent,
                 },
             )
             response = connection.getresponse()

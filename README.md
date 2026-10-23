@@ -71,6 +71,20 @@ python -m scraper "https://www.douyin.com/user/ACCOUNT_ID" \
 
 ## 常用参数
 
+### 翻页模式
+
+- `--pagination api`：页面加载后，直接在页面上下文里请求作品列表接口并按 cursor 翻页，速度远快于滚动，且请求由页面自身补齐会话与签名参数。
+- `--pagination scroll`：保持原有行为，通过滚动页面触发加载。
+- `--pagination auto`（默认）：先尝试 API 翻页，页面未能提供可复用的请求参数或翻页失败时，自动回退到滚动模式；结果 JSON 中的 `pagination_mode` 记录本次配置，警告里会标注是否发生回退。
+
+### 并发下载
+
+`--concurrency N` 可用多个线程并行下载图片，同时共享同一个累计字节预算；结果与清单仍按计划顺序输出。默认 `1` 保持原有的串行行为。
+
+### 下载 User-Agent
+
+图片下载默认使用桌面 Chrome User-Agent，降低 CDN 对非常规 UA 的拒绝；可用 `--download-user-agent` 覆盖。
+
 | 参数 | 作用 | 默认值 |
 |---|---|---:|
 | `--max-scroll` | 最大滚动轮数 | `50` |
@@ -83,6 +97,11 @@ python -m scraper "https://www.douyin.com/user/ACCOUNT_ID" \
 | `--max-file-mb` | 单张图片大小上限 | `50` |
 | `--max-total-mb` | 单次运行累计图片字节上限 | `5120` |
 | `--redownload` | 忽略已验证文件并重新下载 | 关闭 |
+| `--pagination` | 作品翻页模式：`auto` / `api` / `scroll` | `auto` |
+| `--page-size` | API 翻页时每页作品数 | `20` |
+| `--page-interval` | API 翻页页间隔秒数 | `1.0` |
+| `--concurrency` | 图片下载并发数 | `1` |
+| `--download-user-agent` | 图片下载使用的 User-Agent | 桌面 Chrome UA |
 | `--output-dir` | 图片输出根目录 | `downloads/account_images` |
 | `--manifest-dir` | 清单输出根目录 | `output` |
 | `--json` | stdout 只输出结果 JSON | 关闭 |
