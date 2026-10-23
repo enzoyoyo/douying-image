@@ -16,7 +16,7 @@ from scraper.downloader import DEFAULT_DOWNLOAD_USER_AGENT, ImageDownloader
 
 from .conftest import make_png
 
-ACCOUNT_URL = "https://www.douyin.com/user/MS4wLjABAAAA_test"
+ACCOUNT_URL = "https://www.douyin.com/user/MS4wLjABAAAAexample_account"
 
 
 def make_scraper(**kwargs) -> DouyinImageScraper:
@@ -50,7 +50,7 @@ def post_payload(post_id: str, has_more: bool, cursor: int) -> dict:
         "aweme_list": [
             {
                 "aweme_id": post_id,
-                "author": {"sec_uid": "MS4wLjABAAAA_test"},
+                "author": {"sec_uid": "MS4wLjABAAAAexample_account"},
                 "images": [{"url_list": [f"https://p3-sign.douyinpic.com/{post_id}"]}],
             }
         ],
@@ -94,7 +94,7 @@ def test_api_paginate_merges_pages_until_has_more_false(tmp_path: Path) -> None:
     assert scraper._capture_complete is True
     assert scraper._completion_reason == "api_exhausted"
     assert len(page.calls) == 2
-    assert "sec_user_id=MS4wLjABAAAA_test" in page.calls[0]
+    assert "sec_user_id=MS4wLjABAAAAexample_account" in page.calls[0]
     assert "max_cursor=10" in page.calls[1]
 
 
